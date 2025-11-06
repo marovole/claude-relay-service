@@ -6,9 +6,9 @@ version: '3.8'
 services:
   # 🚀 Claude Relay Service
   claude-relay:
-    build: .
-    image: weishaw/claude-relay-service:latest
+    image: marovole000/claude-relay-service:latest
     restart: unless-stopped
+    env_file: .env
     ports:
       # 绑定地址：生产环境建议使用反向代理，设置 BIND_HOST=127.0.0.1
       - "${BIND_HOST:-0.0.0.0}:${PORT:-3000}:3000"
