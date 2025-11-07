@@ -1128,8 +1128,19 @@ class RedisClient {
   // 🔐 会话管理（用于管理员登录等）
   async setSession(sessionId, sessionData, ttl = 86400) {
     const key = `session:${sessionId}`
+
     await this.client.hset(key, sessionData)
-    await this.client.expire(key, ttl)
+
+    if (typeof ttl === 'number' && Number.isFinite(ttl)) {
+      if (ttl > 0) {
+        await this.client.expire(key, Math.ceil(ttl))
+      } else {
+        // ttl <= 0 表示永不过期
+        await this.client.persist(key)
+      }
+    } else {
+      await this.client.expire(key, 86400)
+    }
   }
 
   async getSession(sessionId) {

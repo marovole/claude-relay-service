@@ -9,6 +9,76 @@ const config = require('../../config/config')
 
 const router = express.Router()
 
+const ADMIN_CREDENTIALS_SESSION_KEY = 'admin_credentials'
+const ADMIN_INIT_FILE_PATH = path.join(__dirname, '../../data/init.json')
+const ADMIN_PASSWORD_SALT_ROUNDS = 10
+
+async function syncAdminCredentialsFromFile(reason = 'login') {
+  if (!fs.existsSync(ADMIN_INIT_FILE_PATH)) {
+    logger.warn(
+      `⚠️  Admin init.json not found while syncing credentials (reason: ${reason})`
+    )
+    return null
+  }
+
+  try {
+    const initDataRaw = fs.readFileSync(ADMIN_INIT_FILE_PATH, 'utf8')
+    const initData = JSON.parse(initDataRaw)
+
+    if (!initData.adminUsername || !initData.adminPassword) {
+      logger.error('❌ Admin init.json missing username or password')
+      return null
+    }
+
+    const passwordHash = await bcrypt.hash(initData.adminPassword, ADMIN_PASSWORD_SALT_ROUNDS)
+    const adminData = {
+      username: initData.adminUsername,
+      passwordHash,
+      createdAt: initData.initializedAt || new Date().toISOString(),
+      lastLogin: null,
+      updatedAt: initData.updatedAt || null
+    }
+
+    try {
+      await redis.setSession(ADMIN_CREDENTIALS_SESSION_KEY, adminData, 0)
+      logger.info(
+        `🔁 Admin credentials synchronized from init.json (reason: ${reason || 'unknown'})`
+      )
+    } catch (redisError) {
+      logger.warn('⚠️  Failed to cache admin credentials in Redis, continuing with file data', {
+        error: redisError.message
+      })
+    }
+    return adminData
+  } catch (error) {
+    logger.error('❌ Failed to synchronize admin credentials from init.json:', error)
+    return null
+  }
+}
+
+async function getAdminCredentials(forceReload = false, reason = 'login') {
+  if (!forceReload) {
+    try {
+      const cachedCredentials = await redis.getSession(ADMIN_CREDENTIALS_SESSION_KEY)
+      if (
+        cachedCredentials &&
+        Object.keys(cachedCredentials).length > 0 &&
+        cachedCredentials.username &&
+        cachedCredentials.passwordHash
+      ) {
+        return cachedCredentials
+      }
+    } catch (error) {
+      logger.warn('⚠️  Unable to read admin credentials from Redis, falling back to init.json', {
+        error: error.message,
+        reason
+      })
+    }
+  }
+
+  return await syncAdminCredentialsFromFile(reason)
+}
+
 // 🏠 服务静态文件
 router.use('/assets', express.static(path.join(__dirname, '../../web/assets')))
 
@@ -29,49 +99,35 @@ router.post('/auth/login', async (req, res) => {
       })
     }
 
-    // 从Redis获取管理员信息
-    let adminData = await redis.getSession('admin_credentials')
-
-    // 如果Redis中没有管理员凭据，尝试从init.json重新加载
-    if (!adminData || Object.keys(adminData).length === 0) {
-      const initFilePath = path.join(__dirname, '../../data/init.json')
-
-      if (fs.existsSync(initFilePath)) {
-        try {
-          const initData = JSON.parse(fs.readFileSync(initFilePath, 'utf8'))
-          const saltRounds = 10
-          const passwordHash = await bcrypt.hash(initData.adminPassword, saltRounds)
-
-          adminData = {
-            username: initData.adminUsername,
-            passwordHash,
-            createdAt: initData.initializedAt || new Date().toISOString(),
-            lastLogin: null,
-            updatedAt: initData.updatedAt || null
-          }
-
-          // 重新存储到Redis，不设置过期时间
-          await redis.getClient().hset('session:admin_credentials', adminData)
-
-          logger.info('✅ Admin credentials reloaded from init.json')
-        } catch (error) {
-          logger.error('❌ Failed to reload admin credentials:', error)
-          return res.status(401).json({
-            error: 'Invalid credentials',
-            message: 'Invalid username or password'
-          })
-        }
-      } else {
-        return res.status(401).json({
-          error: 'Invalid credentials',
-          message: 'Invalid username or password'
-        })
-      }
+    // 获取管理员凭据（必要时与 init.json 同步）
+    let adminData = await getAdminCredentials(false, 'login-initial')
+    if (!adminData) {
+      logger.error('❌ Admin credentials unavailable: init.json missing or invalid')
+      return res.status(401).json({
+        error: 'Invalid credentials',
+        message: 'Invalid username or password'
+      })
     }
 
     // 验证用户名和密码
-    const isValidUsername = adminData.username === username
-    const isValidPassword = await bcrypt.compare(password, adminData.passwordHash)
+    let isValidUsername = adminData.username === username
+    let isValidPassword =
+      isValidUsername && adminData.passwordHash
+        ? await bcrypt.compare(password, adminData.passwordHash)
+        : false
+
+    // 如果缓存凭据不匹配，尝试从init.json重新同步
+    if (!isValidUsername || !isValidPassword) {
+      const syncedAdminData = await getAdminCredentials(true, 'login-mismatch')
+      if (syncedAdminData) {
+        adminData = syncedAdminData
+        isValidUsername = adminData.username === username
+        isValidPassword =
+          isValidUsername && adminData.passwordHash
+            ? await bcrypt.compare(password, adminData.passwordHash)
+            : false
+      }
+    }
 
     if (!isValidUsername || !isValidPassword) {
       logger.security(`🔒 Failed login attempt for username: ${username}`)
@@ -172,7 +228,7 @@ router.post('/auth/change-password', async (req, res) => {
     }
 
     // 获取当前管理员信息
-    const adminData = await redis.getSession('admin_credentials')
+    const adminData = await getAdminCredentials(false, 'change-password')
     if (!adminData) {
       return res.status(500).json({
         error: 'Admin data not found',
@@ -227,7 +283,13 @@ router.post('/auth/change-password', async (req, res) => {
         updatedAt: new Date().toISOString()
       }
 
-      await redis.setSession('admin_credentials', updatedAdminData)
+      try {
+        await redis.setSession('admin_credentials', updatedAdminData, 0)
+      } catch (redisError) {
+        logger.warn('⚠️  Failed to refresh admin credentials cache in Redis after password change', {
+          error: redisError.message
+        })
+      }
     } catch (fileError) {
       logger.error('❌ Failed to update init.json:', fileError)
       return res.status(500).json({
@@ -277,7 +339,7 @@ router.get('/auth/user', async (req, res) => {
     }
 
     // 获取管理员信息
-    const adminData = await redis.getSession('admin_credentials')
+    const adminData = await getAdminCredentials(false, 'auth-user')
     if (!adminData) {
       return res.status(500).json({
         error: 'Admin data not found',

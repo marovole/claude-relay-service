@@ -418,7 +418,7 @@ class Application {
         updatedAt: null
       }
 
-      await redis.setSession('admin_credentials', adminCredentials)
+      await redis.setSession('admin_credentials', adminCredentials, 0)
 
       logger.success('✅ Admin credentials initialized successfully')
       logger.info(`📋 Admin username: ${adminCredentials.username}`)
