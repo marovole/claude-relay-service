@@ -1,5 +1,4 @@
-const repository =
-  process.env.PRICE_MIRROR_REPO || process.env.GITHUB_REPOSITORY || 'Wei-Shaw/claude-relay-service'
+const repository = process.env.PRICE_MIRROR_REPO || 'Wei-Shaw/claude-relay-service'
 const branch = process.env.PRICE_MIRROR_BRANCH || 'price-mirror'
 const pricingFileName = process.env.PRICE_MIRROR_FILENAME || 'model_prices_and_context_window.json'
 const hashFileName = process.env.PRICE_MIRROR_HASH_FILENAME || 'model_prices_and_context_window.sha256'
